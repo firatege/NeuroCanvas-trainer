@@ -1,29 +1,36 @@
 # Kullanılacak temel Python imajını belirtin
 FROM python:3.12-slim
 
-# Çalışma dizini
+# Gerekli sistem paketlerini kurmak için ortam değişkenlerini ayarla
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Sistem bağımlılıklarını ve pip'i güncelleyin
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 \
+    libxrender1 \
+    libxi6 \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# Çalışma dizini oluştur ve ayarla
 WORKDIR /app
 
-# Bağımlılık dosyasını kopyalayın
-COPY requirements.txt ./
+# Bağımlılık dosyasını kopyala ve yükle
+COPY requirements.txt .
 
-# Bağımlılıkları kurun
-RUN pip install --no-cache-dir -r requirements.txt
+# Python bağımlılıklarını kur
+RUN pip install --upgrade pip && \
+    pip install --no-cache-dir -r requirements.txt
 
-# OpenCV gibi kütüphanelerin ihtiyaç duyduğu ek sistem bağımlılıklarını kurun
-RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libxrender1 libxi6 && rm -rf /var/lib/apt/lists/*
+# entrypoint.sh dosyasını kopyala ve çalıştırılabilir yap
+COPY entrypoint.sh .
+RUN chmod +x entrypoint.sh
 
-
-
-# entrypoint.sh dosyasını kopyalayın ve çalıştırılabilir yapın
-COPY entrypoint.sh ./
-RUN chmod +x /app/entrypoint.sh
-
-# Diğer tüm proje dosyalarını kopyalayın
+# Tüm proje dosyalarını kopyala
 COPY . .
 
-# Belirtilecek port (belge amaçlı)
+# (İsteğe bağlı) Belirtilecek port – belge amaçlı
 EXPOSE 8080
 
-# Uygulama başlangıç komutu
-ENTRYPOINT ["/app/entrypoint.sh"]
+# Başlatma komutu
+ENTRYPOINT ["./entrypoint.sh"]
