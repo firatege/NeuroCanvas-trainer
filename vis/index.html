@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Neural Network Visualization</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Neural Network Görselleştirmesi</h1>
+            <p>Sinir ağının rakam tanıma sürecini gerçek zamanlı olarak izleyin</p>
+        </header>
+
+        <div class="main-content">
+            <!-- Sol panel - Test görüntüsü ve kontroller -->
+            <div class="left-panel">
+                <div class="input-section">
+                    <h3>Test Görüntüsü</h3>
+                    <canvas id="inputCanvas" width="280" height="280"></canvas>
+                    <div class="controls">
+                        <button id="clearBtn">Temizle</button>
+                        <button id="predictBtn">Tahmin Et</button>
+                        <select id="digitSelect">
+                            <option value="">Rakam Seç</option>
+                            <option value="0">0</option>
+                            <option value="1">1</option>
+                            <option value="2">2</option>
+                            <option value="3">3</option>
+                            <option value="4">4</option>
+                            <option value="5">5</option>
+                            <option value="6">6</option>
+                            <option value="7">7</option>
+                            <option value="8">8</option>
+                            <option value="9">9</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="prediction-section">
+                    <h3>Tahmin Sonuçları</h3>
+                    <div class="prediction-bars">
+                        <div class="bar-container" data-digit="0">
+                            <span class="digit">0</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="1">
+                            <span class="digit">1</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="2">
+                            <span class="digit">2</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="3">
+                            <span class="digit">3</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="4">
+                            <span class="digit">4</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="5">
+                            <span class="digit">5</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="6">
+                            <span class="digit">6</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="7">
+                            <span class="digit">7</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="8">
+                            <span class="digit">8</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                        <div class="bar-container" data-digit="9">
+                            <span class="digit">9</span>
+                            <div class="bar">
+                                <div class="bar-fill"></div>
+                            </div>
+                            <span class="percentage">0%</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sağ panel - Sinir ağı görselleştirmesi -->
+            <div class="right-panel">
+                <div class="network-section">
+                    <h3>Sinir Ağı Yapısı</h3>
+                    <div class="network-container">
+                        <svg id="networkSvg" width="800" height="500">
+                            <!-- Input Layer -->
+                            <g class="layer input-layer" transform="translate(50, 50)">
+                                <text x="0" y="-20" class="layer-label">Input Layer</text>
+                                <text x="0" y="-5" class="layer-subtitle">28x28 pixels</text>
+                            </g>
+
+                            <!-- Hidden Layer 1 -->
+                            <g class="layer hidden-layer-1" transform="translate(250, 50)">
+                                <text x="0" y="-20" class="layer-label">Conv Layer 1</text>
+                                <text x="0" y="-5" class="layer-subtitle">Feature Detection</text>
+                            </g>
+
+                            <!-- Hidden Layer 2 -->
+                            <g class="layer hidden-layer-2" transform="translate(450, 50)">
+                                <text x="0" y="-20" class="layer-label">Conv Layer 2</text>
+                                <text x="0" y="-5" class="layer-subtitle">Pattern Recognition</text>
+                            </g>
+
+                            <!-- Output Layer -->
+                            <g class="layer output-layer" transform="translate(650, 50)">
+                                <text x="0" y="-20" class="layer-label">Output Layer</text>
+                                <text x="0" y="-5" class="layer-subtitle">Digit Classification</text>
+                            </g>
+
+                            <!-- Connections will be drawn here by JavaScript -->
+                            <g id="connections"></g>
+                            
+                            <!-- Nodes will be drawn here by JavaScript -->
+                            <g id="nodes"></g>
+                        </svg>
+                    </div>
+                </div>
+
+                <div class="status-section">
+                    <div id="predictionResult" class="prediction-result">
+                        <span class="label">Tahmin:</span>
+                        <span id="predictedDigit" class="value">-</span>
+                        <span class="label">Güven:</span>
+                        <span id="confidence" class="value">-%</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div class="info-panel">
+            <h3>Nasıl Çalışır?</h3>
+            <div class="info-grid">
+                <div class="info-item">
+                    <div class="info-icon">📝</div>
+                    <h4>1. Çizim</h4>
+                    <p>Sol paneldeki canvas üzerine fare ile rakam çizin veya hazır rakamları seçin</p>
+                </div>
+                <div class="info-item">
+                    <div class="info-icon">🧠</div>
+                    <h4>2. İşleme</h4>
+                    <p>Sinir ağı görüntüyü katman katman işleyerek özellik çıkarır</p>
+                </div>
+                <div class="info-item">
+                    <div class="info-icon">🎯</div>
+                    <h4>3. Tahmin</h4>
+                    <p>Son katmanda hangi rakam olduğuna karar verir ve güven oranını gösterir</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
