@@ -3,7 +3,8 @@ import io
 import cv2
 import numpy as np
 from PIL import Image
-import tensorflow as tf # TensorFlow veya Keras için
+import tensorflow as tf
+from tensorflow import keras
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 import uvicorn
@@ -19,23 +20,52 @@ app = FastAPI()
 
 
 model = None
+viz_model = None  # Visualization model for layer activations
 # Model dosyasının yolu: main.py ile aynı dizinde olduğu için doğrudan dosya adı
 MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.h5")
 
 # Global olarak epoch değerini saklamak için
 current_epoch_value: int = 1 # Varsayılan başlangıç değeri
 
+def create_layer_visualization_model(model):
+    """Create a model that outputs intermediate layer activations - Fixed version from notebook"""
+    # Input layer'ı manuel olarak oluştur
+    input_layer = keras.layers.Input(shape=(28, 28, 1))
+    
+    # Model'in katmanlarını yeniden bağla
+    x = input_layer
+    layer_outputs = []
+    layer_names = []
+    
+    for layer in model.layers:
+        x = layer(x)
+        if 'conv' in layer.name or 'dense' in layer.name:
+            layer_outputs.append(x)
+            layer_names.append(layer.name)
+    
+    logger.info(f"Found layers for visualization: {layer_names}")
+    
+    return keras.models.Model(inputs=input_layer, outputs=layer_outputs)
+
 @app.on_event("startup")
 async def load_keras_model():
     """Uygulama başlatıldığında Keras (H5) modelini yükle."""
-    global model
+    global model, viz_model
     if not os.path.exists(MODEL_PATH):
         logger.error(f"Model dosyası bulunamadı: {MODEL_PATH}")
         raise RuntimeError(f"Model dosyası bulunamadı: {MODEL_PATH}")
     
     try:
-        model = tf.keras.models.load_model(MODEL_PATH)
+        model = keras.models.load_model(MODEL_PATH)
         logger.info(f"Keras modeli '{MODEL_PATH}' başarıyla yüklendi.")
+        
+        # Model'i initialize et ve input layer'ı manuel olarak tanımla
+        dummy_input = tf.zeros((1, 28, 28, 1))
+        _ = model(dummy_input)
+        
+        # Katman görselleştirmesi için yardımcı model oluştur
+        viz_model = create_layer_visualization_model(model)
+        logger.info(f"Visualization model created with {len(viz_model.outputs)} layer outputs")
         
         # Model mimarisini kontrol et
         logger.info("=== MODEL MİMARİSİ ===")
@@ -110,6 +140,78 @@ def preprocess_image_for_model(img_bytes: bytes):
 
     return processed
 
+def get_layer_activations(input_tensor):
+    """Modeldeki katmanların aktivasyonlarını hesaplar - Notebook'tan uyarlanan versiyon."""
+    global viz_model
+    
+    if model is None or viz_model is None:
+        logger.warning("Model veya visualization model yüklenmedi")
+        return []
+    
+    try:
+        # Visualization model ile katman çıktılarını al
+        layer_outputs = viz_model.predict(input_tensor, verbose=0)
+        
+        if not isinstance(layer_outputs, list):
+            layer_outputs = [layer_outputs]
+        
+        activation_data = []
+        
+        # Her katman için aktivasyon özetini çıkar
+        for i, output in enumerate(layer_outputs):
+            try:
+                if len(output.shape) == 4:  # Conv layer (batch, height, width, channels)
+                    # Her kanalın ortalama aktivasyonunu al
+                    channel_means = np.mean(output[0], axis=(0, 1))
+                    # Normalize et (0-1 arası)
+                    if np.max(channel_means) > np.min(channel_means):
+                        normalized = (channel_means - np.min(channel_means)) / (np.max(channel_means) - np.min(channel_means))
+                    else:
+                        normalized = channel_means
+                    activation_summary = normalized.tolist()[:16]  # İlk 16 kanal
+                    
+                elif len(output.shape) == 2:  # Dense layer (batch, units)
+                    # Dense layer aktivasyonları
+                    activations = output[0]
+                    # Normalize et
+                    if np.max(activations) > np.min(activations):
+                        normalized = (activations - np.min(activations)) / (np.max(activations) - np.min(activations))
+                    else:
+                        normalized = activations
+                    activation_summary = normalized.tolist()[:16]  # İlk 16 nöron
+                    
+                else:
+                    # Diğer durumlar için genel ortalama
+                    activation_summary = [float(np.mean(output))]
+                
+                # Katman bilgilerini topla
+                layer_name = viz_model.layers[i+1].name if i+1 < len(viz_model.layers) else f"layer_{i}"
+                layer_info = {
+                    "layer_index": i,
+                    "layer_name": layer_name,
+                    "layer_type": type(viz_model.layers[i+1]).__name__ if i+1 < len(viz_model.layers) else "Unknown",
+                    "output_shape": output.shape,
+                    "activations": activation_summary,
+                    "activation_stats": {
+                        "mean": float(np.mean(output)),
+                        "std": float(np.std(output)),
+                        "min": float(np.min(output)),
+                        "max": float(np.max(output))
+                    }
+                }
+                activation_data.append(layer_info)
+                
+            except Exception as e:
+                logger.error(f"Error processing layer {i}: {e}")
+                continue
+        
+        logger.info(f"Successfully processed {len(activation_data)} layer activations")
+        return activation_data
+        
+    except Exception as e:
+        logger.error(f"Katman aktivasyonları hesaplanırken hata: {e}")
+        return []
+
 # Birinci POST Endpoint'i: Tahmin
 @app.post("/predict")
 async def predict_digit(data: ImageData):
@@ -133,12 +235,17 @@ async def predict_digit(data: ImageData):
         predicted_class = int(np.argmax(probabilities))  # ensure Python int
         
         probabilities_list = probabilities.tolist()
+        
+        # Katman aktivasyonlarını hesapla
+        layer_activations = get_layer_activations(img_tensor)
 
         logger.info(f"Tahmin: {predicted_class}, Olasılıklar: {probabilities_list}")
 
         return {
             "prediction": predicted_class,
-            "probabilities": probabilities_list
+            "probabilities": probabilities_list,
+            "layer_activations": layer_activations,
+            "confidence": float(np.max(probabilities))
         }
 
     except Exception as e:
