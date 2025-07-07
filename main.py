@@ -1,68 +1,77 @@
-# main.py
-
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import HTMLResponse
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-import numpy as np
 import base64
-import cv2
 import io
-import tensorflow as tf
-from tensorflow.keras.models import load_model
+import cv2
+import numpy as np
+from PIL import Image
+import tensorflow as tf # TensorFlow veya Keras için
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+import uvicorn
 import os
-import json
+import logging
+from typing import List, Optional
 
-# FastAPI uygulamasını başlatın
+# Loglama ayarları
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
 app = FastAPI()
 
-# Modelinizi yükleyin
+
 model = None
-try:
-    model = load_model('model.h5')
-    print("Model başarıyla yüklendi.")
-    model.summary()
-except Exception as e:
-    print(f"Model yüklenirken hata oluştu: {e}")
+# Model dosyasının yolu: main.py ile aynı dizinde olduğu için doğrudan dosya adı
+MODEL_PATH = os.path.join(os.path.dirname(__file__), "model.h5")
 
-# Frontend dosyalarının bulunduğu dizini belirtin
-frontend_dir = os.path.join(os.path.dirname(__file__), 'public')
+# Global olarak epoch değerini saklamak için
+current_epoch_value: int = 1 # Varsayılan başlangıç değeri
 
-# Statik dosyaları sunmak için StaticFiles'ı bağlayın
-# Önemli: WebSocket endpoint'inden önce tanımlanmalı ve spesifik bir path'e mount edilmeli
-app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+@app.on_event("startup")
+async def load_keras_model():
+    """Uygulama başlatıldığında Keras (H5) modelini yükle."""
+    global model
+    if not os.path.exists(MODEL_PATH):
+        logger.error(f"Model dosyası bulunamadı: {MODEL_PATH}")
+        raise RuntimeError(f"Model dosyası bulunamadı: {MODEL_PATH}")
+    
+    try:
+        model = tf.keras.models.load_model(MODEL_PATH)
+        logger.info(f"Keras modeli '{MODEL_PATH}' başarıyla yüklendi.")
+        
+        # Model mimarisini kontrol et
+        logger.info("=== MODEL MİMARİSİ ===")
+        model.summary(print_fn=logger.info)
+        
+        # Model ağırlıklarını kontrol et
+        logger.info("=== MODEL AĞIRLIKLARI ===")
+        for i, layer in enumerate(model.layers):
+            if hasattr(layer, 'get_weights') and layer.get_weights():
+                weights = layer.get_weights()
+                logger.info(f"Katman {i} ({layer.name}): {len(weights)} ağırlık dizisi")
+                for j, weight in enumerate(weights):
+                    logger.info(f"  Ağırlık {j}: shape={weight.shape}, mean={np.mean(weight):.6f}, std={np.std(weight):.6f}")
+        
+        # Test verisi ile model performansını kontrol et
+        logger.info("=== MODEL TEST ===")
+        test_input = np.random.random((1, 28, 28, 1)).astype('float32')
+        test_predictions = model.predict(test_input, verbose=0)
+        test_probabilities = tf.nn.softmax(test_predictions, axis=1)
+        test_probabilities = np.array(test_probabilities)[0]
+        logger.info(f"Rastgele test girdisi için tahmin: {test_probabilities}")
+        
+        # Model eğitim geçmişini kontrol et (eğer varsa)
+        if hasattr(model, 'history'):
+            logger.info(f"Model eğitim geçmişi: {model.history}")
+            
+    except Exception as e:
+        logger.error(f"Keras model yüklenirken hata oluştu: {e}")
+        raise RuntimeError(f"Keras model yüklenemedi: {e}")
 
-# Ana route için HTML sayfasını döndür - UTF-8 encoding ile
-@app.get("/", response_class=HTMLResponse)
-async def get_html():
-    with open(os.path.join(frontend_dir, "index.html"), "r", encoding="utf-8") as f:
-        html_content = f.read()
-    return HTMLResponse(content=html_content, media_type="text/html; charset=utf-8")
+class ImageData(BaseModel):
+    image: str # Base64 encoded image string (e.g., data:image/png;base64,...)
 
-# Bağlı WebSocket istemcilerini takip etmek için
-class ConnectionManager:
-    def __init__(self):
-        self.active_connections: list[WebSocket] = []
+class EpochUpdate(BaseModel):
+    epoch: int # Yeni epoch değeri
 
-    async def connect(self, websocket: WebSocket):
-        await websocket.accept()
-        self.active_connections.append(websocket)
-        print(f"İstemci bağlandı: {websocket.client}")
-
-    def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
-        print(f"İstemci bağlantısı kesildi: {websocket.client}")
-
-    async def send_personal_message(self, message: str, websocket: WebSocket):
-        await websocket.send_text(message)
-
-    async def broadcast(self, message: str):
-        for connection in self.active_connections:
-            await connection.send_text(message)
-
-manager = ConnectionManager()
-
-# Resim ön işleme fonksiyonu
 def preprocess_image_for_model(img_bytes: bytes):
     """
     Process image bytes for MNIST digit recognition model using OpenCV.
@@ -94,124 +103,74 @@ def preprocess_image_for_model(img_bytes: bytes):
     processed = np.expand_dims(processed, axis=0)
     processed = np.expand_dims(processed, axis=-1)
 
+    # Debugging: işlenmiş görüntü hakkında bilgi ver
+    logger.info(f"Processed image shape: {processed.shape}")
+    logger.info(f"Processed image min/max: {processed.min():.4f}/{processed.max():.4f}")
+    logger.info(f"Processed image mean: {processed.mean():.4f}")
+
     return processed
 
-# WebSocket endpoint'i
-@app.websocket("/ws")
-async def websocket_endpoint(websocket: WebSocket):
-    await manager.connect(websocket)
+# Birinci POST Endpoint'i: Tahmin
+@app.post("/predict")
+async def predict_digit(data: ImageData):
+    """Base64 kodlu görüntüyü alır, işler ve rakam tahmini döndürür."""
+    if model is None:
+        logger.error("Model henüz yüklenmedi veya yüklenirken hata oluştu.")
+        raise HTTPException(status_code=503, detail="Model henüz hazır değil.")
+
     try:
-        # Bağlantı kurulduğunda modelin durumu hakkında bilgi gönder
-        await manager.send_personal_message(json.dumps({
-            "type": "model_status",
-            "status": "ready" if model is not None else "error",
-            "message": "Model hazır" if model is not None else "Model yüklenirken hata oluştu"
-        }), websocket)
+        # Base64 kodlu görüntüyü çöz
+        if not data.image.startswith("data:image/"):
+            raise HTTPException(status_code=400, detail="Geçersiz görüntü formatı. Base64 kodlu bir resim bekleniyor.")
+        header, encoded = data.image.split(",", 1)
+        img_bytes = base64.b64decode(encoded)
+        img_tensor = preprocess_image_for_model(img_bytes)
+        if img_tensor is None:
+            raise HTTPException(status_code=400, detail="Görüntü işlenemedi. Lütfen geçerli bir görüntü gönderin.")
+        
+        predictions = model.predict(img_tensor)    # zaten softmaxlı sonuç
+        probabilities = predictions[0]             # doğrudan kullanın
+        predicted_class = int(np.argmax(probabilities))  # ensure Python int
+        
+        probabilities_list = probabilities.tolist()
 
-        while True:
-            # İstemciden metin mesajı al
-            data = await websocket.receive_text()
-            print(f"İstemciden mesaj alındı: {data}")
+        logger.info(f"Tahmin: {predicted_class}, Olasılıklar: {probabilities_list}")
 
-            try:
-                message = json.loads(data)
+        return {
+            "prediction": predicted_class,
+            "probabilities": probabilities_list
+        }
 
-                # Farklı mesaj tiplerini ele al
-                if message.get("type") == "digit_image":
-                    if model is None:
-                        await manager.send_personal_message(json.dumps({
-                            "type": "error",
-                            "message": "Model henüz yüklenmedi veya yüklenirken hata oluştu."
-                        }), websocket)
-                        continue
-
-                    imageData = message.get("image")
-
-                    if not isinstance(imageData, str):
-                         await manager.send_personal_message(json.dumps({
-                            "type": "error",
-                            "message": "Geçersiz resim verisi formatı."
-                        }), websocket)
-                         continue
-
-                    # Base64 string'den byte verisine dönüştür
-                    if "," in imageData:
-                        header, base64_string = imageData.split(",", 1)
-                    else:
-                        base64_string = imageData
-
-                    try:
-                        img_bytes = base64.b64decode(base64_string)
-                    except Exception as e:
-                         await manager.send_personal_message(json.dumps({
-                            "type": "error",
-                            "message": f"Base64 çözme hatası: {e}"
-                        }), websocket)
-                         continue
-
-                    # Resmi ön işle
-                    processed_image = preprocess_image_for_model(img_bytes)
-
-                    if processed_image is None:
-                         await manager.send_personal_message(json.dumps({
-                            "type": "error",
-                            "message": "Resim verisi işlenemedi."
-                        }), websocket)
-                         continue
-
-                    # Tahmin yap
-                    predictions = model.predict(processed_image)
-                    predicted_digit = int(np.argmax(predictions, axis=1)[0])
-                    # Görselleştirme verisi
-                    visualization_data = {
-                        "prediction_scores": predictions.tolist()
-                    }
-
-                    # Tahmin sonucunu ve görselleştirme verisini istemciye geri gönder
-                    await manager.send_personal_message(json.dumps({
-                        "type": "prediction_result",
-                        "prediction": predicted_digit,
-                        "cnn_viz_data": visualization_data
-                    }), websocket)
-
-                elif message.get("type") == "epoch_update":
-                    epochs = message.get("epochs")
-                    print(f"İstemci {websocket.client} eğitim epoch sayısını güncelledi: {epochs}")
-                    await manager.send_personal_message(json.dumps({
-                        "type": "epoch_updated_ack",
-                        "epochs": epochs,
-                        "message": "Epoch değeri alındı."
-                    }), websocket)
-
-                else:
-                    print(f"Bilinmeyen mesaj tipi: {message.get('type')}")
-                    await manager.send_personal_message(json.dumps({
-                        "type": "error",
-                        "message": f"Bilinmeyen mesaj tipi: {message.get('type')}"
-                    }), websocket)
-
-            except json.JSONDecodeError:
-                 await manager.send_personal_message(json.dumps({
-                    "type": "error",
-                    "message": "Geçersiz JSON formatı."
-                }), websocket)
-            except Exception as e:
-                print(f"Mesaj işlenirken hata: {e}")
-                await manager.send_personal_message(json.dumps({
-                    "type": "error",
-                    "message": f"Mesaj işlenirken hata oluştu: {e}"
-                }), websocket)
-
-    except WebSocketDisconnect:
-        manager.disconnect(websocket)
-        print(f"İstemci bağlantısı kesildi: {websocket.client}")
     except Exception as e:
-        print(f"WebSocket genel hata: {e}")
-        manager.disconnect(websocket)
-        try:
-            await websocket.send_text(json.dumps({
-                "type": "error",
-                "message": f"Bir hata oluştu: {e}"
-            }))
-        except:
-            pass
+        logger.error(f"Görüntü işleme veya tahmin sırasında hata: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"Görüntü işleme hatası: {e}")
+
+# İkinci POST Endpoint'i: Epoch Değerini Ayarla / Eğitim Başlat
+@app.post("/set_epoch")
+async def set_epoch(data: EpochUpdate):
+    """Frontend'den gelen epoch değerini günceller."""
+    global current_epoch_value
+    if data.epoch < 1:
+        raise HTTPException(status_code=400, detail="Epoch değeri en az 1 olmalıdır.")
+    
+    current_epoch_value = data.epoch
+    logger.info(f"Epoch değeri güncellendi: {current_epoch_value}")
+
+    # Burada gerçek bir eğitim başlatma veya model güncelleme mantığı eklenebilir.
+    # Örneğin:
+    # if model is not None:
+    #    start_model_training_async(current_epoch_value, model)
+    # else:
+    #    logger.warn("Model yüklenmediği için eğitim başlatılamıyor.")
+
+    return {"status": "success", "message": f"Epoch değeri {current_epoch_value} olarak ayarlandı."}
+
+# Epoch değerini almak için bir GET endpoint'i de ekleyebiliriz (isteğe bağlı)
+@app.get("/get_epoch")
+async def get_epoch():
+    """Mevcut epoch değerini döndürür."""
+    return {"current_epoch": current_epoch_value}
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000) # Rust'ın bağlanacağı adres
